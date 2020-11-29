@@ -1,0 +1,199 @@
+#!/usr/bin/env python3
+
+import sys, os
+import json
+import math
+import requests
+from pprint import pprint
+import shogi.Ayane as ayane
+
+import matplotlib
+matplotlib.use('Agg') 
+import matplotlib.pyplot as plt
+
+user_name = "teyo_shogi"
+num_thread       = 4
+hash_mb          = 2048
+consider_time_ms = 8000
+multi_pv         = 4
+
+store_dir = "/home/saito/shogi/wars/" + user_name + "/"
+engine_bin = os.path.dirname(__file__) + "/YaneuraOu-by-gcc"
+
+#結果はJSONに変換して保存
+"""
+{
+    "length" : 棋譜の手数
+    "eval" : [評価値(勝率ベース)]
+    "kifu": 実際の棋譜
+    "henka" :[
+        {
+        turn: 変化した手数
+        tejun:[
+            {
+                rank : 0,
+                eval : この変化の評価値,
+                kifu : 変化手順,
+            },
+            {
+                rank : 1,
+                eval : この変化の評価値,
+                kifu : 変化手順,
+            }
+        ]
+        }, 
+    ]
+}
+"""
+
+
+# 勝率換算
+def sigmoid(x, i = 1):
+    t = -x if i%2 == 0 else x
+    return 100.0/(1.0+math.exp(-(t)/600.0)) 
+
+# その他のあれも設定
+def get_engine_option():
+    return {
+        "USI_Hash":str(hash_mb),
+        "Threads":str(num_thread),
+        "NetworkDelay":"0",
+        "NetworkDelay2":"0",
+        "BookFile": "no_book"
+    }
+
+usi = None
+
+def usi_init():
+    global usi
+    usi = ayane.UsiEngine()
+    usi.set_engine_options(get_engine_option())
+    usi.connect(engine_bin)
+
+def get_store_direcotry(id):
+    return store_dir + "/all/" + str(id)
+
+def consider(position):
+    global usi
+    usi.send_command("multipv " + str(multi_pv))
+    usi.usi_position(position)
+    usi.usi_go_and_wait_bestmove("btime 0 wtime 0 byoyomi "+ str(consider_time_ms))
+    result = usi.think_result
+    return result
+
+def analysis(id, key, sfen):
+    directory = get_store_direcotry(id)
+    if(os.path.exists(directory)):
+        return
+    os.makedirs(directory)
+    print(sfen)
+    fig_x = []
+    scores = []
+    for i in range(multi_pv):
+        scores.append([])
+
+    moves = sfen.split()
+    moves.pop(0)
+    position = moves.pop(0) + " " + moves.pop(0)
+    max_move = len(moves)
+
+    out = {
+        "length" : max_move,
+        "kifu"   : moves,
+        "henka"  : []
+    }
+
+    for n, one_move in enumerate(moves):
+        position = position + " " + one_move
+        result = consider(position)
+        print(str(n) + " / " + str(max_move))
+        fig_x.append(n+1)
+        henka = { "turn" : n , "tejun" : [] }
+        for i, pv in enumerate(result.pvs):
+            score = sigmoid(int(pv.eval), n)
+            scores[i].append(score)
+            henka["tejun"].append({
+                "rank" : i, 
+                "eval" : score,
+                "kifu" : pv.pv
+            })
+        if( multi_pv != len(result.pvs)):
+            for i in range(len(result.pvs), multi_pv):
+                alt_pvs   = result.pvs[-1]
+                alt_score = sigmoid(int(alt_pvs.eval), n)
+                scores[i].append(alt_score)
+        out["henka"].append(henka)
+    out["eval"] = scores[0],
+
+    # 評価値グラフ
+    for i in range(multi_pv):
+        fig = plt.figure()
+        ax = fig.add_subplot(1, 1, 1, ylim=(0, 100))
+        ax.plot(fig_x, scores[i])
+        plt.savefig(directory + "/eval{}.png".format(i))
+        plt.close(fig)
+
+    if True:
+        fig = plt.figure()
+        ax = fig.add_subplot(1, 1, 1, ylim=(0, 100))
+        for i in range(multi_pv):
+            ax.plot(fig_x, scores[i])
+        plt.savefig(directory + "/eval.png")
+        plt.hlines([50], 0, max_move, "blue", linestyles='dashed')     # hlines
+        plt.close(fig)
+
+    with open(directory + "/result.json", "w", encoding="utf-8") as fp:
+        fp.write("{}".format(json.dumps(out, indent=4)))
+
+def retrive_sfen_list():
+    headers = {
+        'Referer': 'https://www.shogi-extend.com/swars/search?query='+user_name
+    }
+    params = (('query', user_name),)
+    res = requests.get('https://www.shogi-extend.com/w.json', headers=headers, params=params)
+    records = res.json()["records"]
+    ret= [];
+    for record in records:
+        member = record['memberships']
+        if(member[0]['label'] == "自分"):
+            user  = member[0]
+            other = member[1]
+        else:
+            user  = member[1]
+            other = member[0]
+ 
+        ret.append((record['id'], record['key'], record['sfen_body'], user, other))
+    return ret
+
+def arrange_by_type(id, user ,other):
+    source = get_store_direcotry(id)
+    win_lose = user["judge"]["key"]
+    dirs = []
+    for s in user["attack_tag_list"]:
+        dirs.append(s + "/" + win_lose)
+    for s in user["defense_tag_list"]:
+        dirs.append(s + "/" + win_lose)
+    for s in other["attack_tag_list"]:
+        dirs.append("vs" + s + "/" + win_lose)
+    for s in other["defense_tag_list"]:
+        dirs.append("vs" + s + "/" + win_lose)
+    for d in dirs:
+        dir_name = store_dir + d
+        if(not os.path.exists(dir_name)):
+            os.makedirs(dir_name)
+        if(not os.path.exists(dir_name + "/" + str(id))):
+            os.symlink(source, dir_name + "/" + str(id))
+
+
+def main():
+    usi_init()
+    sfens = retrive_sfen_list()
+    for id, key, sfen, user, other in sfens:
+        analysis(id, key, sfen)
+        arrange_by_type(id, user, other)
+    global usi
+    usi.disconnect()
+        
+
+if __name__ == "__main__":
+    main()
