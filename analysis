@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 user_name = "teyo_shogi"
 num_thread       = 4
 hash_mb          = 2048
-consider_time_ms = 1000
+consider_time_ms = 8000
 multi_pv         = 4
 
 store_dir = "/home/saito/shogi/wars/" + user_name + "/"
@@ -139,6 +139,7 @@ def analysis(id, key, sfen):
         for i in range(multi_pv):
             ax.plot(fig_x, scores[i])
         plt.savefig(directory + "/eval.png")
+        plt.hlines([50], 0, max_move, "blue", linestyles='dashed')     # hlines
         plt.close(fig)
 
     with open(directory + "/result.json", "w", encoding="utf-8") as fp:
@@ -190,6 +191,8 @@ def main():
     for id, key, sfen, user, other in sfens:
         analysis(id, key, sfen)
         arrange_by_type(id, user, other)
+    global usi
+    usi.disconnect()
         
 if __name__ == "__main__":
     main()
